@@ -38,6 +38,7 @@ import java.net.URL
 import java.net.URLDecoder
 import java.net.HttpURLConnection
 import org.json.JSONObject
+import kotlinx.coroutines.delay
 
 private val Night = Color(0xFF090914)
 private val Panel = Color(0xFF1A1930)
@@ -201,7 +202,13 @@ class ComposeActivity : ComponentActivity() {
         var result by remember { mutableStateOf("Ready to download media") }
         var instance by remember { mutableStateOf(store.getString("cobalt_endpoint", "").orEmpty()) }
         LaunchedEffect(incomingLink) { if(incomingLink.isNotBlank()) url = incomingLink }
-        LaunchedEffect(url) { resolvedMedia = ""; resolverMessage = "" }
+        LaunchedEffect(url, instance) {
+            resolvedMedia = ""; resolverMessage = ""
+            if (url.startsWith("https://") && !isDirectMedia(url.trim()) && instance.startsWith("https://")) {
+                delay(950)
+                if (!resolving) resolveSocial(url.trim(), instance.trim())
+            }
+        }
         val valid = remember(url) { isDirectMedia(url.trim()) }
         val name = remember(url) { if (valid) filename(url.trim()) else "" }
         MaterialTheme(colorScheme = darkColorScheme(
