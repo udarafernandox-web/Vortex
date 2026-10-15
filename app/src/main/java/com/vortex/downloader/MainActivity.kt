@@ -28,7 +28,7 @@ class MainActivity: Activity() {
  override fun onResume(){super.onResume();Handler(Looper.getMainLooper()).postDelayed({ clipboard(false) },250)}
  private fun button(parent:LinearLayout,t:String,fn:()->Unit){ val b=label(t).apply{background=shape(surface);setPadding(dp(12),dp(16),dp(12),dp(16));setOnClickListener{fn()}};parent.addView(b,LinearLayout.LayoutParams(-1,-2).apply{bottomMargin=dp(12)}) }
  private fun render(){
-   val sc=ScrollView(this).apply { setBackgroundColor(bg);fillViewport=true }
+   val sc=ScrollView(this).apply { setBackgroundColor(bg);isFillViewport=true }
    val root=LinearLayout(this).apply{orientation=1;setPadding(dp(22),dp(28),dp(22),dp(28))}
    sc.addView(root);setContentView(sc)
    root.addView(label("VORTEX",34f).apply{typeface=Typeface.DEFAULT_BOLD})
@@ -62,7 +62,7 @@ class MainActivity: Activity() {
  }
  private fun loadHistory(){
   history.removeAllViews()
-  prefs.all.filterKeys{it.startsWith("file_")}.entries.takeLast(12).reversed().forEach { e->
+  prefs.all.filterKeys{it.startsWith("file_")}.entries.toList().takeLast(12).reversed().forEach { e->
    val b=label("↓  ${e.value}",14f).apply{gravity=Gravity.START;background=shape(surface);setPadding(dp(16),dp(15),dp(16),dp(15))}
    history.addView(b,LinearLayout.LayoutParams(-1,-2).apply{bottomMargin=dp(7)})
   }
