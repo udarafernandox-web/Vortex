@@ -103,8 +103,8 @@ class ComposeActivity : ComponentActivity() {
             .trimStart('.').take(90).ifBlank { "vortex-download" }
     }
 
-    private fun enqueue(url: String): String {
-        if (!isDirectMedia(url)) return "Unsupported link. Use a direct HTTPS media file URL."
+    private fun enqueue(url: String, resolved: Boolean = false): String {
+        if (!isDirectMedia(url) && !(resolved && url.startsWith("https://"))) return "Unsupported link. Use direct HTTPS media or resolve a social post."
         return try {
             val name = filename(url)
             val req = DownloadManager.Request(Uri.parse(url))
@@ -217,7 +217,7 @@ class ComposeActivity : ComponentActivity() {
                 Text("VORTEX", fontSize = 36.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 5.sp)
                 Text("Paste. Pull. Save.", color = Muted, fontSize = 14.sp)
                 Spacer(Modifier.height(26.dp))
-                VortexAnimation { if (valid) result = enqueue(url.trim()) else if (resolvedMedia.isNotBlank()) result = enqueue(resolvedMedia) else resolveSocial(url.trim(), instance.trim()) }
+                VortexAnimation { if (valid) result = enqueue(url.trim()) else if (resolvedMedia.isNotBlank()) result = enqueue(resolvedMedia, true) else resolveSocial(url.trim(), instance.trim()) }
                 Text("TAP THE VORTEX TO DOWNLOAD", color = Purple, fontSize = 12.sp)
                 Spacer(Modifier.height(24.dp))
                 OutlinedTextField(
@@ -267,7 +267,7 @@ class ComposeActivity : ComponentActivity() {
                     }
                     Spacer(Modifier.height(8.dp))
                 }
-                Button(onClick = { result = enqueue(if(valid) url.trim() else resolvedMedia) },
+                Button(onClick = { result = enqueue(if(valid) url.trim() else resolvedMedia, !valid) },
                     enabled = valid || resolvedMedia.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
                     Text("DOWNLOAD MEDIA")
                 }
