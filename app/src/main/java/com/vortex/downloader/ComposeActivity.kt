@@ -36,6 +36,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.net.URL
 import java.net.URLDecoder
+import java.net.HttpURLConnection
+import org.json.JSONObject
 
 private val Night = Color(0xFF090914)
 private val Panel = Color(0xFF1A1930)
@@ -50,6 +52,9 @@ class ComposeActivity : ComponentActivity() {
     private var incomingLink by mutableStateOf("")
     private var clipboardSuggestion by mutableStateOf("")
     private var refreshHistory by mutableIntStateOf(0)
+    private var endpoint by mutableStateOf(store.getString("resolver_endpoint", "").orEmpty())
+    private var quality by mutableStateOf("1080")
+    private var busy by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -115,6 +120,87 @@ class ComposeActivity : ComponentActivity() {
         } catch (e: Exception) { "Download failed: ${e.localizedMessage}" }
     }
 
+    private fun resolveAndQueue(source: String, report: (String) -> Unit) {
+        val base = endpoint.trim().trimEnd('/')
+        if (!base.startsWith("https://") || Uri.parse(base).host.isNullOrBlank()) {
+            report("Configure your authorized HTTPS Cobalt API endpoint first.")
+            return
+        }
+        if (!source.startsWith("https://", ignoreCase = true)) {
+            report("A valid HTTPS media link is required.")
+            return
+        }
+        if (busy) return
+        busy = true
+        Thread {
+            val message = try {
+                val connection = URL("$base/").openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.connectTimeout = 12000
+                connection.readTimeout = 25000
+                connection.setRequestProperty("Accept", "application/json")
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.doOutput = true
+                val payload = JSONObject()
+                    .put("url", source)
+                    .put("videoQuality", quality)
+                    .put("downloadMode", "auto").toString()
+                connection.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+                val status = connection.responseCode
+                val response = (if(status in 200..299) connection.inputStream else connection.errorStream)
+                    ?.bufferedReader()?.use { it.readText() }.orEmpty()
+                connection.disconnect()
+                if (status !in 200..299) "Resolver HTTP $status: ${response.take(160)}"
+                else {
+                    val obj = JSONObject(response)
+                    when (obj.optString("status")) {
+                        "redirect", "tunnel" -> {
+                            val target = obj.optString("url")
+                            if (!target.startsWith("https://")) "Resolver returned an unsafe download URL"
+                            else enqueueResolved(target, obj.optString("filename"))
+                        }
+                        "picker" -> {
+                            val choices = obj.optJSONArray("picker")
+                            var selected = ""
+                            if (choices != null) {
+                                for (i in 0 until choices.length()) {
+                                    val item = choices.optJSONObject(i)
+                                    if (item?.optString("type") == "video" && item.optString("url").startsWith("https://")) {
+                                        selected = item.optString("url")
+                                        break
+                                    }
+                                }
+                            }
+                            if (selected.isBlank()) "No downloadable video in media picker"
+                            else enqueueResolved(selected, "vortex-video.mp4")
+                        }
+                        "error" -> "Resolver: ${obj.optJSONObject("error")?.optString("code") ?: "Unknown error"}"
+                        "local-processing" -> "This source needs local FFmpeg processing (not included in this version)."
+                        else -> "Unexpected resolver response"
+                    }
+                }
+            } catch (e: Exception) { "Resolver error: ${e.localizedMessage}" }
+            runOnUiThread { busy = false; refreshHistory++; report(message) }
+        }.start()
+    }
+
+    private fun enqueueResolved(link: String, suggestedName: String): String {
+        return try {
+            val safeName = suggestedName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                .trimStart('.').take(90).ifBlank { "vortex-video.mp4" }
+            val request = DownloadManager.Request(Uri.parse(link))
+                .setTitle(safeName)
+                .setDescription("VORTEX resolved download")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "VORTEX/$safeName")
+            val id = (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
+            val old = store.getString("ids", "").orEmpty()
+            store.edit().putString("ids", (listOf(id.toString()) + old.split(',').filter { it.isNotBlank() }).distinct().take(100).joinToString(","))
+                .putString("name_$id", safeName).apply()
+            "Queued $safeName"
+        } catch (e: Exception) { "Queue error: ${e.localizedMessage}" }
+    }
+
     private fun downloads(): List<Pair<String, String>> {
         refreshHistory // compose state read to refresh after resume / enqueue
         val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
@@ -157,7 +243,7 @@ class ComposeActivity : ComponentActivity() {
                 Text("VORTEX", fontSize = 36.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 5.sp)
                 Text("Paste. Pull. Save.", color = Muted, fontSize = 14.sp)
                 Spacer(Modifier.height(26.dp))
-                VortexAnimation { result = enqueue(url.trim()) }
+                VortexAnimation { if (valid) result = enqueue(url.trim()) else resolveAndQueue(url.trim()) { result = it } }
                 Text("TAP THE VORTEX TO DOWNLOAD", color = Purple, fontSize = 12.sp)
                 Spacer(Modifier.height(24.dp))
                 OutlinedTextField(
@@ -185,11 +271,33 @@ class ComposeActivity : ComponentActivity() {
                         }
                     }
                 } else if(url.isNotBlank()) {
-                    Text("Only direct HTTPS file links are supported in V1; social post pages need a separately authorized resolver.", color = Muted, fontSize = 12.sp)
+                    Text("Social link detected. Configure your own Cobalt-compatible resolver below to fetch the video.", color = Muted, fontSize = 12.sp)
                 }
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = { result = enqueue(url.trim()) }, enabled = valid, modifier = Modifier.fillMaxWidth()) {
-                    Text("DOWNLOAD MEDIA")
+                OutlinedTextField(
+                    value = endpoint,
+                    onValueChange = { endpoint = it.trim(); store.edit().putString("resolver_endpoint", endpoint).apply() },
+                    label = { Text("Cobalt API endpoint (your server)") },
+                    placeholder = { Text("https://your-cobalt-instance.example") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    listOf("720", "1080", "2160").forEach { option ->
+                        TextButton(onClick = { quality = option }) {
+                            Text("${option}p", color = if(quality == option) Cyan else Muted)
+                        }
+                    }
+                }
+                Button(
+                    onClick = {
+                        if(valid) result = enqueue(url.trim())
+                        else resolveAndQueue(url.trim()) { result = it }
+                    },
+                    enabled = url.startsWith("https://") && !busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if(busy) "RESOLVING..." else if(valid) "DOWNLOAD FILE" else "FETCH VIDEO & DOWNLOAD")
                 }
                 Text(result, color = Muted, modifier = Modifier.padding(12.dp), textAlign = TextAlign.Center)
                 OutlinedButton(onClick = {
@@ -211,7 +319,7 @@ class ComposeActivity : ComponentActivity() {
                     }
                 }
                 Spacer(Modifier.height(18.dp))
-                Text("Supports direct HTTPS files only. Download content you are authorized to save.",
+                Text("Social links need a configured, authorized Cobalt instance. DRM and private content are unsupported. Only save media you have permission to download.",
                     color = Muted, fontSize = 11.sp, textAlign = TextAlign.Center)
             }
         }
