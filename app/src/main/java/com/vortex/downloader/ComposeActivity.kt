@@ -36,6 +36,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.net.URL
 import java.net.URLDecoder
+import java.net.HttpURLConnection
+import org.json.JSONObject
 
 private val Night = Color(0xFF090914)
 private val Panel = Color(0xFF1A1930)
@@ -49,6 +51,9 @@ class ComposeActivity : ComponentActivity() {
     private val store by lazy { getSharedPreferences("vortex_v1", MODE_PRIVATE) }
     private var incomingLink by mutableStateOf("")
     private var clipboardSuggestion by mutableStateOf("")
+    private var resolvedMedia by mutableStateOf("")
+    private var resolverMessage by mutableStateOf("")
+    private var resolving by mutableStateOf(false)
     private var refreshHistory by mutableIntStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -70,6 +75,7 @@ class ComposeActivity : ComponentActivity() {
             manager.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.let { extractUrl(it) }
         } catch (_: Exception) { null }
         clipboardSuggestion = candidate?.takeIf { it != incomingLink } ?: ""
+        if (incomingLink.isBlank() && !candidate.isNullOrBlank()) incomingLink = candidate
         refreshHistory++
     }
 
@@ -115,6 +121,58 @@ class ComposeActivity : ComponentActivity() {
         } catch (e: Exception) { "Download failed: ${e.localizedMessage}" }
     }
 
+    private fun resolveSocial(source: String, instance: String) {
+        if (instance.isBlank()) {
+            resolverMessage = "Social links need your own Cobalt server or an authorized API endpoint. Enter its HTTPS URL below."
+            return
+        }
+        if (!instance.startsWith("https://") || !source.startsWith("https://")) {
+            resolverMessage = "Only HTTPS URLs are accepted."
+            return
+        }
+        resolving = true
+        resolverMessage = "Fetching media..."
+        resolvedMedia = ""
+        Thread {
+            try {
+                val endpoint = URL(instance.trimEnd('/') + "/")
+                val connection = endpoint.openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.connectTimeout = 12000
+                connection.readTimeout = 30000
+                connection.doOutput = true
+                connection.setRequestProperty("Accept", "application/json")
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.use {
+                    it.write(JSONObject().put("url", source).put("videoQuality", "1080").toString().toByteArray())
+                }
+                val status = connection.responseCode
+                val body = (if (status in 200..299) connection.inputStream else connection.errorStream)
+                    ?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val result = JSONObject(body)
+                val kind = result.optString("status")
+                val media = if (kind == "redirect" || kind == "tunnel") result.optString("url") else ""
+                val error = when (kind) {
+                    "redirect", "tunnel" -> if (media.startsWith("https://")) "Media found. Tap Download Media." else "Invalid media URL returned."
+                    "picker" -> "This post contains multiple items. Multi-item picker is not implemented yet."
+                    "local-processing" -> "This video needs local muxing or conversion; not supported yet."
+                    else -> "Resolver: " + result.optJSONObject("error")?.optString("code", "unsupported link")
+                }
+                runOnUiThread {
+                    resolvedMedia = if (media.startsWith("https://")) media else ""
+                    resolverMessage = error
+                    resolving = false
+                }
+                connection.disconnect()
+            } catch (e: Exception) {
+                runOnUiThread {
+                    resolverMessage = "Could not fetch media: " + (e.localizedMessage ?: "network error")
+                    resolving = false
+                }
+            }
+        }.start()
+    }
+
     private fun downloads(): List<Pair<String, String>> {
         refreshHistory // compose state read to refresh after resume / enqueue
         val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
@@ -140,8 +198,10 @@ class ComposeActivity : ComponentActivity() {
     @Composable
     private fun VortexScreen() {
         var url by remember { mutableStateOf(incomingLink) }
-        var result by remember { mutableStateOf("Ready to download direct media") }
+        var result by remember { mutableStateOf("Ready to download media") }
+        var instance by remember { mutableStateOf(store.getString("cobalt_endpoint", "").orEmpty()) }
         LaunchedEffect(incomingLink) { if(incomingLink.isNotBlank()) url = incomingLink }
+        LaunchedEffect(url) { resolvedMedia = ""; resolverMessage = "" }
         val valid = remember(url) { isDirectMedia(url.trim()) }
         val name = remember(url) { if (valid) filename(url.trim()) else "" }
         MaterialTheme(colorScheme = darkColorScheme(
@@ -157,7 +217,7 @@ class ComposeActivity : ComponentActivity() {
                 Text("VORTEX", fontSize = 36.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 5.sp)
                 Text("Paste. Pull. Save.", color = Muted, fontSize = 14.sp)
                 Spacer(Modifier.height(26.dp))
-                VortexAnimation { result = enqueue(url.trim()) }
+                VortexAnimation { if (valid) result = enqueue(url.trim()) else if (resolvedMedia.isNotBlank()) result = enqueue(resolvedMedia) else resolveSocial(url.trim(), instance.trim()) }
                 Text("TAP THE VORTEX TO DOWNLOAD", color = Purple, fontSize = 12.sp)
                 Spacer(Modifier.height(24.dp))
                 OutlinedTextField(
@@ -185,10 +245,30 @@ class ComposeActivity : ComponentActivity() {
                         }
                     }
                 } else if(url.isNotBlank()) {
-                    Text("Only direct HTTPS file links are supported in V1; social post pages need a separately authorized resolver.", color = Muted, fontSize = 12.sp)
+                    Text("Social link detected. Fetch its downloadable media using your configured Cobalt instance.", color = Muted, fontSize = 12.sp)
                 }
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = { result = enqueue(url.trim()) }, enabled = valid, modifier = Modifier.fillMaxWidth()) {
+                if (!valid && url.isNotBlank()) {
+                    OutlinedTextField(value = instance, onValueChange = {
+                        instance = it
+                        store.edit().putString("cobalt_endpoint", it).apply()
+                    }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        label = { Text("Your Cobalt API HTTPS endpoint") },
+                        placeholder = { Text("https://your-instance.example") })
+                    Spacer(Modifier.height(8.dp))
+                    Button(onClick = { resolveSocial(url.trim(), instance.trim()) },
+                        enabled = !resolving && url.startsWith("https://"), modifier = Modifier.fillMaxWidth()) {
+                        Text(if (resolving) "FETCHING..." else "AUTO FETCH MEDIA LINK")
+                    }
+                    if (resolverMessage.isNotBlank()) Text(resolverMessage, color = Muted, fontSize = 12.sp)
+                    if (resolvedMedia.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Resolved media ready", color = Cyan)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                Button(onClick = { result = enqueue(if(valid) url.trim() else resolvedMedia) },
+                    enabled = valid || resolvedMedia.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
                     Text("DOWNLOAD MEDIA")
                 }
                 Text(result, color = Muted, modifier = Modifier.padding(12.dp), textAlign = TextAlign.Center)
@@ -211,7 +291,7 @@ class ComposeActivity : ComponentActivity() {
                     }
                 }
                 Spacer(Modifier.height(18.dp))
-                Text("Supports direct HTTPS files only. Download content you are authorized to save.",
+                Text("Direct HTTPS files work immediately. Social posts require an authorized Cobalt instance. Download only authorized content.",
                     color = Muted, fontSize = 11.sp, textAlign = TextAlign.Center)
             }
         }
